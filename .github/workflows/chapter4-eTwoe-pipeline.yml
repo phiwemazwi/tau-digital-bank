@@ -1,11 +1,11 @@
-name: eTwoe-pipeline
+name: eTwoe pipeline
 run-name: Build, Deploy, Test - from user @${{ github.actor }}
 
 on: 
   workflow_dispatch:
 
-jobs:
-  build:
+jobs: 
+  build:  
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -19,8 +19,19 @@ jobs:
 
       - name: Run Unit Tests
         run: mvn test
+  
+      - name: Build with Maven
+        run: mvn -DskipTests -B package --no-transfer-progress --file ./pom.xml
 
-analyze:
+      - name: rename Artefakt
+        run: mv ./target/*digitalbank*.war ./target/digibank.war
+
+      - uses: actions/upload-artifact@master
+        with:
+          name: digibank.war
+          path: ./target/digibank*
+    
+  analyze:
     name: Analyze
     runs-on: ubuntu-latest
     permissions:
@@ -50,3 +61,77 @@ analyze:
       uses: github/codeql-action/analyze@v2
       with:
         category: "/language:${{matrix.language}}"
+        
+  cleanup:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: UAT
+
+    steps: 
+      - name: "cleanup destination at ${{ vars.UAT_IP }}"
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.UAT_IP }}
+          port: ${{ vars.UAT_PORT }}
+          username: ${{ secrets.USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            rm -rf ./deployment/*
+            rm -rf ${{ vars.UAT_TOMCAT }}/digi*
+            
+  deploy: 
+    needs: [cleanup]
+    runs-on: ubuntu-latest
+    environment: UAT
+    
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: digibank.war
+          path: ./deploy
+          
+      - run: ls -ltr ./deploy
+          
+      - name: deploy
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ vars.UAT_IP }}
+          port: ${{ vars.UAT_PORT }}
+          username: ${{ secrets.USER }}
+          key: ${{ secrets.SSH_KEY }}
+          source: './deploy/digibank.war'
+          target: 'deployment'
+          
+  install:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    environment: UAT
+
+    steps: 
+      - name: "cleanup destination at ${{ vars.UAT_IP }}"
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.UAT_IP }}
+          port: ${{ vars.UAT_PORT }}
+          username: ${{ secrets.USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: cp -f /home/ec2-user/deployment/deploy/digibank.war ${{ vars.UAT_TOMCAT }}
+          
+      - name: Sleep for 10 seconds
+        run: sleep 10s
+        shell: bash
+        
+  eTwoe-tests:
+    needs: [install]
+    runs-on: ubuntu-latest
+    environment: UAT
+    name: Trigger eTwoe Tests on UAT Environment
+
+    steps:
+      - name: Trigger Workflow from eTwoe tests with Playwright
+        run: |
+          curl -X POST \
+          -H "Authorization: Bearer ${{ secrets.PAT_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/tau-github-actions-for-testing/tau-digital-bank-eTwoe-tests/dispatches \
+          -d  '{"event_type": "trigger-tests", "client_payload" : { "sut" : "${{ vars.UAT_IP }}" } }'
